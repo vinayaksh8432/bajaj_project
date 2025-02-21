@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from "react";
-import Webcam from "react-webcam";
 import { toast } from "react-hot-toast";
 import useWorkoutStore from "../store/workoutStore";
 
@@ -17,18 +16,18 @@ const EXERCISE_CONFIG = {
     squat: {
         confidence: 0.3,
         cooldown: 1000,
-        downAngle: 70, // From the Python model
-        upAngle: 160, // From the Python model
+        downAngle: 130, // Adjusted for better squat detection
+        upAngle: 170, // Adjusted for standing position
     },
     "push-up": {
-        downAngle: 85, // Adjusted for better upper body detection
-        upAngle: 150, // Adjusted for better upper body detection
-        confidence: 0.5, // Increased confidence threshold
-        cooldown: 1200, // Slightly increased cooldown for better detection
+        downAngle: 85,
+        upAngle: 150,
+        confidence: 0.5,
+        cooldown: 1200,
     },
     "sit-up": {
-        downAngle: 55, // From the Python model
-        upAngle: 105, // From the Python model
+        downAngle: 55,
+        upAngle: 105,
         confidence: 0.3,
         cooldown: 1000,
     },
@@ -39,33 +38,34 @@ const POSE_CONNECTIONS = [
     [0, 1],
     [1, 2],
     [2, 3],
-    [3, 7], // Face
+    [3, 7],
     [0, 4],
     [4, 5],
     [5, 6],
-    [6, 8], // Face
-    [9, 10], // Shoulders
+    [6, 8],
+    [9, 10],
     [9, 11],
     [11, 13],
-    [13, 15], // Left arm
+    [13, 15],
     [10, 12],
     [12, 14],
-    [14, 16], // Right arm
+    [14, 16],
     [11, 23],
     [23, 25],
-    [25, 27], // Left leg
+    [25, 27],
     [12, 24],
     [24, 26],
-    [26, 28], // Right leg
-    [23, 24], // Hips
+    [26, 28],
+    [23, 24],
 ];
 
 export default function Workout() {
-    const webcamRef = useRef(null);
+    const videoRef = useRef(null);
     const canvasRef = useRef(null);
     const requestRef = useRef();
+    const countIntervalRef = useRef(null);
     const [detector, setDetector] = useState(null);
-    const [cameraEnabled, setCameraEnabled] = useState(false);
+    const [videoFile, setVideoFile] = useState(null);
     const [selectedExercise, setSelectedExercise] = useState(null);
     const [isModelLoading, setIsModelLoading] = useState(false);
     const {
@@ -76,124 +76,164 @@ export default function Workout() {
         addWorkout,
     } = useWorkoutStore();
 
-    useEffect(() => {
-        let poseDetector = null;
-        let camera = null;
+    const handleVideoUpload = (event) => {
+        const file = event.target.files[0];
+        if (file) {
+            const videoUrl = URL.createObjectURL(file);
+            setVideoFile(videoUrl);
+            if (videoRef.current) {
+                videoRef.current.src = videoUrl;
+            }
+        }
+    };
 
-        const initializeDetector = async () => {
-            try {
-                setIsModelLoading(true);
+    const startExercise = async () => {
+        if (!selectedExercise || !videoFile) {
+            toast.error("Please select an exercise and upload a video");
+            return;
+        }
 
-                // Initialize MediaPipe Pose
-                poseDetector = new window.Pose({
-                    locateFile: (file) => {
-                        return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
-                    },
-                });
+        setIsModelLoading(true);
 
-                // Configure pose detection
-                await poseDetector.setOptions({
-                    modelComplexity: 1,
-                    smoothLandmarks: true,
-                    minDetectionConfidence: 0.5,
-                    minTrackingConfidence: 0.5,
-                });
+        try {
+            // Initialize MediaPipe Pose
+            const poseDetector = new window.Pose({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+                },
+            });
 
-                // Set up pose detection callback
-                poseDetector.onResults((results) => {
-                    if (results.poseLandmarks) {
-                        drawPose(results.poseLandmarks);
-                        if (currentWorkout) {
-                            processPose(results.poseLandmarks);
-                        }
+            // Configure pose detection
+            await poseDetector.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5,
+            });
+
+            // Set up pose detection callback
+            poseDetector.onResults((results) => {
+                if (results.poseLandmarks) {
+                    drawPose(results.poseLandmarks);
+                    // Process pose for exercise counting
+                    switch (selectedExercise.id) {
+                        case "squat":
+                            processSquat(results.poseLandmarks);
+                            break;
+                        case "push-up":
+                            processPushup(results.poseLandmarks);
+                            break;
+                        case "sit-up":
+                            processSitup(results.poseLandmarks);
+                            break;
                     }
-                });
-
-                setDetector(poseDetector);
-
-                // Wait for the video element to be ready
-                while (!webcamRef.current?.video?.readyState) {
-                    await new Promise((resolve) => setTimeout(resolve, 100));
                 }
+            });
 
-                // Initialize camera after pose detector is ready
-                camera = new window.Camera(webcamRef.current.video, {
-                    onFrame: async () => {
-                        try {
-                            if (webcamRef.current?.video) {
-                                await poseDetector.send({
-                                    image: webcamRef.current.video,
-                                });
-                            }
-                        } catch (error) {
-                            console.error(
-                                "Error in camera frame processing:",
-                                error
-                            );
-                        }
-                    },
-                    width: 1280,
-                    height: 720,
-                });
+            setDetector(poseDetector);
+            setIsModelLoading(false);
+            toast.success("AI model loaded successfully");
 
-                await camera.start();
-                setIsModelLoading(false);
-                toast.success("AI model loaded successfully");
-            } catch (error) {
-                console.error("Error initializing pose detector:", error);
-                setIsModelLoading(false);
-                toast.error("Failed to load AI model. Please try again.");
+            // Start the workout with initial count
+            const initialWorkout = {
+                id: selectedExercise.id,
+                name: selectedExercise.name,
+                target: selectedExercise.target,
+                count: 0,
+                lastRepTime: null,
+                isDown: false,
+            };
+            setCurrentWorkout(initialWorkout);
+
+            // Start playing the video
+            if (videoRef.current) {
+                videoRef.current.play();
+            }
+        } catch (error) {
+            console.error("Error initializing pose detector:", error);
+            setIsModelLoading(false);
+            toast.error("Failed to load AI model. Please try again.");
+        }
+    };
+
+    useEffect(() => {
+        // Check if target is reached
+        if (currentWorkout && currentWorkout.count >= currentWorkout.target) {
+            stopExercise();
+        }
+    }, [currentWorkout?.count]);
+
+    useEffect(() => {
+        let animationFrame;
+
+        const processFrame = async () => {
+            if (videoRef.current && detector && currentWorkout) {
+                try {
+                    await detector.send({ image: videoRef.current });
+                    animationFrame = requestAnimationFrame(processFrame);
+                    requestRef.current = animationFrame;
+                } catch (error) {
+                    console.error("Error processing video frame:", error);
+                }
             }
         };
 
-        if (cameraEnabled) {
-            initializeDetector();
+        if (currentWorkout) {
+            processFrame();
         }
 
         return () => {
-            const cleanup = async () => {
-                try {
-                    if (camera) {
-                        await camera.stop();
-                    }
-                    if (poseDetector) {
-                        await poseDetector.close();
-                    }
-                    if (webcamRef.current?.video?.srcObject) {
-                        const tracks =
-                            webcamRef.current.video.srcObject.getTracks();
-                        tracks.forEach((track) => track.stop());
-                    }
-                    clearCanvas();
-                } catch (error) {
-                    console.error("Error during cleanup:", error);
-                }
-            };
-            cleanup();
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+            }
         };
-    }, [cameraEnabled, currentWorkout]);
+    }, [detector, currentWorkout]);
+
+    // Add video end event handler
+    useEffect(() => {
+        const handleVideoEnd = () => {
+            if (currentWorkout) {
+                stopExercise();
+            }
+        };
+
+        if (videoRef.current) {
+            videoRef.current.addEventListener("ended", handleVideoEnd);
+        }
+
+        return () => {
+            if (videoRef.current) {
+                videoRef.current.removeEventListener("ended", handleVideoEnd);
+            }
+        };
+    }, [currentWorkout]);
 
     const drawPose = (poseLandmarks) => {
         const ctx = canvasRef.current?.getContext("2d");
-        if (!ctx || !webcamRef.current?.video) return;
+        if (!ctx || !videoRef.current) return;
 
-        const videoWidth = webcamRef.current.video.videoWidth;
-        const videoHeight = webcamRef.current.video.videoHeight;
+        const videoElement = videoRef.current;
+        const canvasElement = canvasRef.current;
 
-        canvasRef.current.width = videoWidth;
-        canvasRef.current.height = videoHeight;
+        // Get the actual dimensions of the displayed video
+        const displayWidth = videoElement.clientWidth;
+        const displayHeight = videoElement.clientHeight;
 
-        // Clear the canvas and save the context state
-        ctx.clearRect(0, 0, videoWidth, videoHeight);
-        ctx.save();
+        // Set canvas size to match display size
+        canvasElement.width = displayWidth;
+        canvasElement.height = displayHeight;
 
-        // Mirror the context to match the video feed
-        ctx.scale(-1, 1);
-        ctx.translate(-videoWidth, 0);
+        // Calculate scaling factors
+        const scaleX = displayWidth / videoElement.videoWidth;
+        const scaleY = displayHeight / videoElement.videoHeight;
+
+        // Clear the canvas
+        ctx.clearRect(0, 0, displayWidth, displayHeight);
 
         // Draw connections
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgb(0, 255, 0)";
+        ctx.fillStyle = "rgb(0, 255, 0)";
 
         POSE_CONNECTIONS.forEach(([start, end]) => {
             const startPoint = poseLandmarks[start];
@@ -207,10 +247,13 @@ export default function Workout() {
             ) {
                 ctx.beginPath();
                 ctx.moveTo(
-                    startPoint.x * videoWidth,
-                    startPoint.y * videoHeight
+                    startPoint.x * displayWidth,
+                    startPoint.y * displayHeight
                 );
-                ctx.lineTo(endPoint.x * videoWidth, endPoint.y * videoHeight);
+                ctx.lineTo(
+                    endPoint.x * displayWidth,
+                    endPoint.y * displayHeight
+                );
                 ctx.stroke();
             }
         });
@@ -218,22 +261,22 @@ export default function Workout() {
         // Draw keypoints
         poseLandmarks.forEach((landmark) => {
             if (landmark.visibility > 0.5) {
-                const x = landmark.x * videoWidth;
-                const y = landmark.y * videoHeight;
+                const x = landmark.x * displayWidth;
+                const y = landmark.y * displayHeight;
 
+                // Draw outer circle (black)
                 ctx.beginPath();
-                ctx.arc(x, y, 8, 0, 2 * Math.PI);
+                ctx.arc(x, y, 6, 0, 2 * Math.PI);
                 ctx.fillStyle = "#000000";
                 ctx.fill();
 
+                // Draw inner circle (green)
                 ctx.beginPath();
-                ctx.arc(x, y, 6, 0, 2 * Math.PI);
+                ctx.arc(x, y, 4, 0, 2 * Math.PI);
                 ctx.fillStyle = "#00ff00";
                 ctx.fill();
             }
         });
-
-        ctx.restore();
     };
 
     const processPose = (pose) => {
@@ -261,12 +304,13 @@ export default function Workout() {
     };
 
     const processSquat = (pose) => {
-        const leftHip = pose.find((kp) => kp.name === "left_hip");
-        const leftKnee = pose.find((kp) => kp.name === "left_knee");
-        const leftAnkle = pose.find((kp) => kp.name === "left_ankle");
-        const rightHip = pose.find((kp) => kp.name === "right_hip");
-        const rightKnee = pose.find((kp) => kp.name === "right_knee");
-        const rightAnkle = pose.find((kp) => kp.name === "right_ankle");
+        // Use direct indices for landmarks instead of find method
+        const leftHip = pose[23]; // Left hip landmark
+        const leftKnee = pose[25]; // Left knee landmark
+        const leftAnkle = pose[27]; // Left ankle landmark
+        const rightHip = pose[24]; // Right hip landmark
+        const rightKnee = pose[26]; // Right knee landmark
+        const rightAnkle = pose[28]; // Right ankle landmark
 
         if (
             !leftHip ||
@@ -274,7 +318,13 @@ export default function Workout() {
             !leftAnkle ||
             !rightHip ||
             !rightKnee ||
-            !rightAnkle
+            !rightAnkle ||
+            leftHip.visibility < 0.5 ||
+            leftKnee.visibility < 0.5 ||
+            leftAnkle.visibility < 0.5 ||
+            rightHip.visibility < 0.5 ||
+            rightKnee.visibility < 0.5 ||
+            rightAnkle.visibility < 0.5
         )
             return;
 
@@ -288,12 +338,14 @@ export default function Workout() {
             rightLegAngle,
             avgLegAngle,
             isDown: currentWorkout.isDown,
+            threshold: EXERCISE_CONFIG[currentWorkout.id].downAngle,
         });
 
         const now = Date.now();
 
+        // Check if in squat position (legs bent)
         if (
-            avgLegAngle < EXERCISE_CONFIG[currentWorkout.id].downAngle &&
+            avgLegAngle <= EXERCISE_CONFIG[currentWorkout.id].downAngle &&
             !currentWorkout.isDown
         ) {
             const newCount = currentWorkout.count + 1;
@@ -307,8 +359,10 @@ export default function Workout() {
             if (newCount % 5 === 0 || newCount === currentWorkout.target) {
                 toast.success(`Completed ${newCount} squats!`);
             }
-        } else if (
-            avgLegAngle > EXERCISE_CONFIG[currentWorkout.id].upAngle &&
+        }
+        // Check if back to standing position
+        else if (
+            avgLegAngle >= EXERCISE_CONFIG[currentWorkout.id].upAngle &&
             currentWorkout.isDown
         ) {
             updateWorkoutProgress({
@@ -393,11 +447,20 @@ export default function Workout() {
     };
 
     const processSitup = (pose) => {
-        const leftShoulder = pose.find((kp) => kp.name === "left_shoulder");
-        const leftHip = pose.find((kp) => kp.name === "left_hip");
-        const leftKnee = pose.find((kp) => kp.name === "left_knee");
+        // Use direct indices for landmarks
+        const leftShoulder = pose[11];
+        const leftHip = pose[23];
+        const leftKnee = pose[25];
 
-        if (!leftShoulder || !leftHip || !leftKnee) return;
+        if (
+            !leftShoulder ||
+            !leftHip ||
+            !leftKnee ||
+            leftShoulder.visibility < 0.5 ||
+            leftHip.visibility < 0.5 ||
+            leftKnee.visibility < 0.5
+        )
+            return;
 
         // Calculate angle between shoulder, hip, and knee
         const angle = calculateAngle(leftShoulder, leftHip, leftKnee);
@@ -449,179 +512,179 @@ export default function Workout() {
         return angle;
     };
 
-    // Handle exercise selection
     const handleExerciseSelect = (exercise) => {
         setSelectedExercise(exercise);
-        toast.success(`Selected ${exercise.name}. Click Start to begin!`);
-    };
-
-    // Start exercise tracking
-    const startExercise = () => {
-        if (!selectedExercise) {
-            toast.error("Please select an exercise first!");
-            return;
-        }
-
-        // Clear the canvas
-        clearCanvas();
-
-        setCurrentWorkout({
-            ...selectedExercise,
-            count: 0,
-            isDown: false,
-            isUp: false,
-            lastRepTime: 0,
-            startTime: new Date(),
-        });
-
-        // Enable camera which will trigger pose detection
-        setCameraEnabled(true);
-        toast.success(`Starting ${selectedExercise.name}. Get ready!`);
-    };
-
-    // Stop exercise tracking
-    const stopExercise = async () => {
-        // Disable camera first to stop pose detection
-        setCameraEnabled(false);
-
-        // Clear the canvas
-        clearCanvas();
-
-        // Save the workout data if exists
-        if (currentWorkout) {
-            try {
-                const now = new Date();
-                // Format date as YYYY-MM-DD HH:mm:ss
-                const formattedDate = now
-                    .toISOString()
-                    .slice(0, 19)
-                    .replace("T", " ");
-
-                await addWorkout({
-                    exercise_type: currentWorkout.id,
-                    reps: currentWorkout.count,
-                    date: formattedDate,
-                });
-                toast.success("Workout saved successfully!");
-            } catch (error) {
-                console.error("Error saving workout:", error);
-                toast.error("Failed to save workout. Please try again.");
-            }
-        }
-
-        // Reset states
         clearCurrentWorkout();
-        setSelectedExercise(null);
+        // Clear video if one was previously uploaded
+        setVideoFile(null);
+        if (videoRef.current) {
+            videoRef.current.src = "";
+        }
     };
 
-    // Add this function to clear the canvas
-    const clearCanvas = () => {
-        const ctx = canvasRef.current?.getContext("2d");
-        if (ctx && canvasRef.current) {
-            ctx.clearRect(
-                0,
-                0,
-                canvasRef.current.width,
-                canvasRef.current.height
+    const stopExercise = async () => {
+        if (!currentWorkout) return;
+
+        try {
+            // Stop video playback first
+            if (videoRef.current) {
+                videoRef.current.pause();
+            }
+
+            // Clear the counting interval
+            if (countIntervalRef.current) {
+                clearInterval(countIntervalRef.current);
+                countIntervalRef.current = null;
+            }
+
+            // Cancel any pending animation frames
+            if (requestRef.current) {
+                cancelAnimationFrame(requestRef.current);
+                requestRef.current = null;
+            }
+
+            // Cleanup MediaPipe detector
+            if (detector) {
+                await detector.close();
+                setDetector(null);
+            }
+
+            // Save workout data
+            await addWorkout({
+                exerciseId: currentWorkout.id,
+                count: currentWorkout.count,
+                target: currentWorkout.target,
+            });
+
+            // Store name before clearing workout
+            const workoutName = currentWorkout.name;
+            const workoutCount = currentWorkout.count;
+
+            // Clear the canvas
+            const ctx = canvasRef.current?.getContext("2d");
+            if (ctx && canvasRef.current) {
+                const width = canvasRef.current.width;
+                const height = canvasRef.current.height;
+                ctx.clearRect(0, 0, width, height);
+            }
+
+            // Clear all states
+            clearCurrentWorkout();
+            setSelectedExercise(null);
+            setVideoFile(null);
+
+            // Clear video source
+            if (videoRef.current) {
+                videoRef.current.removeAttribute("src");
+                videoRef.current.load();
+            }
+
+            toast.success(
+                `Workout completed! You did ${workoutCount} ${workoutName}`
             );
+        } catch (error) {
+            console.error("Error stopping workout:", error);
+            toast.error("Failed to save workout. Please try again.");
         }
     };
 
     return (
-        <div className="container mx-auto px-4 py-8">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Webcam Feed */}
-                <div className="card">
-                    <h2 className="text-2xl font-bold mb-4">Camera Feed</h2>
-                    <div className="relative aspect-[16/9] w-full bg-gray-100 rounded-lg overflow-hidden">
-                        {cameraEnabled ? (
-                            <>
-                                <Webcam
-                                    ref={webcamRef}
-                                    className="absolute inset-0 w-full h-full object-cover"
-                                    mirrored={true}
-                                    screenshotFormat="image/jpeg"
-                                    videoConstraints={{
-                                        facingMode: "user",
-                                        width: 1280,
-                                        height: 720,
-                                        aspectRatio: 16 / 9,
-                                    }}
-                                />
-                                <canvas
-                                    ref={canvasRef}
-                                    className="absolute inset-0 w-full h-full"
-                                />
-                                {isModelLoading && (
-                                    <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                                        <div className="text-white text-center">
-                                            <div className="animate-spin rounded-full h-12 w-12 border-4 border-primary-500 border-t-transparent mx-auto mb-2"></div>
-                                            <p>Loading AI Model...</p>
-                                        </div>
-                                    </div>
-                                )}
-                                {currentWorkout && !isModelLoading && (
-                                    <div className="absolute top-4 right-4 bg-primary-600 text-white px-4 py-2 rounded-full">
-                                        Count: {currentWorkout.count} /{" "}
-                                        {currentWorkout.target}
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div className="flex items-center justify-center h-full">
-                                <p className="text-gray-500">
-                                    Camera will be enabled when you start the
-                                    exercise
-                                </p>
-                            </div>
-                        )}
-                    </div>
-                </div>
+        <div className="container mx-auto px-4 py-8 flex justify-between gap-8">
+            {/* Left side - Controls and Information */}
+            <div className="w-1/3">
+                <h1 className="text-3xl font-bold mb-8">Workout Session</h1>
 
-                {/* Exercise Selection */}
-                <div className="card">
-                    <h2 className="text-2xl font-bold mb-4">Choose Exercise</h2>
-                    <div className="space-y-4">
+                <div className="mb-8">
+                    <h2 className="text-xl font-semibold mb-4">
+                        1. Select Exercise
+                    </h2>
+                    <div className="flex flex-col gap-4">
                         {exercises.map((exercise) => (
                             <button
                                 key={exercise.id}
                                 onClick={() => handleExerciseSelect(exercise)}
-                                disabled={!!currentWorkout}
-                                className={`w-full p-4 rounded-lg text-left transition-colors
-                                    ${
-                                        selectedExercise?.id === exercise.id
-                                            ? "bg-primary-100 border-2 border-primary-500"
-                                            : "bg-white border-2 border-gray-200 hover:border-primary-500"
-                                    }
-                                `}
+                                disabled={currentWorkout}
+                                className={`px-4 py-2 rounded ${
+                                    selectedExercise?.id === exercise.id
+                                        ? "bg-primary-500 text-white"
+                                        : "bg-gray-200"
+                                } ${
+                                    currentWorkout
+                                        ? "opacity-50 cursor-not-allowed"
+                                        : ""
+                                }`}
                             >
-                                <h3 className="font-semibold text-lg">
-                                    {exercise.name}
-                                </h3>
-                                <p className="text-gray-600">
-                                    Target: {exercise.target} reps
-                                </p>
+                                {exercise.name}
                             </button>
                         ))}
                     </div>
+                </div>
 
-                    {selectedExercise && !currentWorkout && (
+                {selectedExercise && !currentWorkout && (
+                    <div className="mb-8">
+                        <h2 className="text-xl font-semibold mb-4">
+                            2. Upload Video
+                        </h2>
+                        <input
+                            type="file"
+                            accept="video/*"
+                            onChange={handleVideoUpload}
+                            className="mb-4"
+                        />
+                    </div>
+                )}
+
+                {currentWorkout && (
+                    <div className="mb-8">
+                        <h2 className="text-xl font-semibold mb-4">Progress</h2>
+                        <div className="bg-white rounded-lg p-6 shadow-md">
+                            <div className="text-3xl font-bold text-center mb-2">
+                                {currentWorkout.count} / {currentWorkout.target}
+                            </div>
+                            <div className="text-lg text-center text-gray-600">
+                                {currentWorkout.name}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <div className="flex justify-center">
+                    {!currentWorkout && selectedExercise && videoFile && (
                         <button
                             onClick={startExercise}
-                            className="mt-6 w-full btn-primary"
+                            disabled={isModelLoading}
+                            className="w-full px-6 py-3 bg-primary-500 text-white rounded disabled:opacity-50"
                         >
-                            Start {selectedExercise.name}
+                            {isModelLoading
+                                ? "Loading AI Model..."
+                                : "3. Start Exercise"}
                         </button>
                     )}
-
                     {currentWorkout && (
                         <button
                             onClick={stopExercise}
-                            className="mt-6 w-full btn-secondary"
+                            className="w-full px-6 py-3 bg-red-500 text-white rounded"
                         >
                             Stop Exercise
                         </button>
                     )}
+                </div>
+            </div>
+
+            {/* Right side - Video Display */}
+            <div className="w-2/3 relative">
+                <div className="relative w-full h-0 pb-[56.25%]">
+                    <video
+                        ref={videoRef}
+                        className="absolute top-0 left-0 w-full h-full object-contain rounded-lg shadow-lg"
+                        playsInline
+                        loop
+                    />
+                    <canvas
+                        ref={canvasRef}
+                        className="absolute top-0 left-0 w-full h-full"
+                        style={{ objectFit: "contain" }}
+                    />
                 </div>
             </div>
         </div>
